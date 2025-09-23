@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Unity.AI.Navigation;
 using UnityEngine;
 
 public class MazeGeneratorHybrid : MonoBehaviour
@@ -20,11 +21,13 @@ public class MazeGeneratorHybrid : MonoBehaviour
     public GameObject crossPrefab;     // all 4 openings
 
     [Header("Optional Markers")]
+    public NavMeshSurface navMeshSurface;
     public GameObject startMarkerPrefab;
     public GameObject exitMarkerPrefab;
 
     // Internal maze cell representation
     private Cell[,] grid;
+    private Cell[,] roomGrid;
 
     private struct Cell
     {
@@ -34,6 +37,8 @@ public class MazeGeneratorHybrid : MonoBehaviour
         public bool openE; // +X
         public bool openS; // -Z
         public bool openW; // -X
+
+        public bool isRoom; // whether this cell is part of a room
     }
 
     void Start()
@@ -46,7 +51,7 @@ public class MazeGeneratorHybrid : MonoBehaviour
     {
         // Clean previous build
         for (int i = transform.childCount - 1; i >= 0; i--)
-            DestroyImmediate(transform.GetChild(i).gameObject);
+            Destroy(transform.GetChild(i).gameObject);
 
         if (useSeed) Random.InitState(seed);
 
@@ -54,16 +59,26 @@ public class MazeGeneratorHybrid : MonoBehaviour
         grid = new Cell[width, height];
         BuildMazeDFS();
 
+        // Optional: add some rooms and passages
+        AddRooms();
+        AddExtraConnections();
+
         // 2) Instantiate tiles
         BuildTiles();
 
         // 3) Place start & exit (farthest path)
         PlaceStartAndExit();
+
+        // 4) Update the NavMesh
+        if (navMeshSurface != null)
+        {
+            navMeshSurface.BuildNavMesh();
+        }
     }
 
     private void BuildMazeDFS()
     {
-        // Start from (0,0) (bottom-left). You can randomize it if you like.
+        // Start from (0,0) (bottom-left). Can be randomised if desired
         Stack<Vector2Int> stack = new Stack<Vector2Int>();
         Vector2Int current = new Vector2Int(0, 0);
         grid[current.x, current.y].visited = true;
@@ -75,10 +90,10 @@ public class MazeGeneratorHybrid : MonoBehaviour
             List<(Vector2Int dir, System.Action carve)> neighbors = new List<(Vector2Int, System.Action)>();
 
             // Check unvisited neighbors and prepare carving lambdas
-            TryAddNeighbor(current, Vector2Int.up,    () => { grid[current.x, current.y].openN = true; grid[current.x, current.y + 1].openS = true; }, neighbors);   // N (+Z)
+            TryAddNeighbor(current, Vector2Int.up, () => { grid[current.x, current.y].openN = true; grid[current.x, current.y + 1].openS = true; }, neighbors);   // N (+Z)
             TryAddNeighbor(current, Vector2Int.right, () => { grid[current.x, current.y].openE = true; grid[current.x + 1, current.y].openW = true; }, neighbors);   // E (+X)
-            TryAddNeighbor(current, Vector2Int.down,  () => { grid[current.x, current.y].openS = true; grid[current.x, current.y - 1].openN = true; }, neighbors);   // S (-Z)
-            TryAddNeighbor(current, Vector2Int.left,  () => { grid[current.x, current.y].openW = true; grid[current.x - 1, current.y].openE = true; }, neighbors);   // W (-X)
+            TryAddNeighbor(current, Vector2Int.down, () => { grid[current.x, current.y].openS = true; grid[current.x, current.y - 1].openN = true; }, neighbors);   // S (-Z)
+            TryAddNeighbor(current, Vector2Int.left, () => { grid[current.x, current.y].openW = true; grid[current.x - 1, current.y].openE = true; }, neighbors);   // W (-X)
 
             if (neighbors.Count > 0)
             {
@@ -130,16 +145,16 @@ public class MazeGeneratorHybrid : MonoBehaviour
                     // T-junction: our T prefab is open Left, Front, Right (closed Back).
                     // Rotate so the CLOSED side matches the side that is NOT open.
                     // Find the missing direction:
-                    bool missBack  = !cell.openS; // Back = -Z
+                    bool missBack = !cell.openS; // Back = -Z
                     bool missRight = !cell.openE; // Right = +X
                     bool missFront = !cell.openN; // Front = +Z
-                    bool missLeft  = !cell.openW; // Left = -X
+                    bool missLeft = !cell.openW; // Left = -X
 
                     prefab = tPrefab;
-                    if (missBack)      yRot = 0f;    // already closed Back by default
+                    if (missBack) yRot = 0f;    // already closed Back by default
                     else if (missRight) yRot = 270f; // rotate so closed side goes to Right
                     else if (missFront) yRot = 180f; // closed Front
-                    else if (missLeft)  yRot = 90f;  // closed Left
+                    else if (missLeft) yRot = 90f;  // closed Left
                 }
                 else if (openings == 2)
                 {
@@ -156,7 +171,7 @@ public class MazeGeneratorHybrid : MonoBehaviour
                     {
                         // Corner: default opens Front & Right; rotate to match the two open directions
                         prefab = cornerPrefab;
-                        if (cell.openN && cell.openE)      yRot = 0f;   // Front+Right (default)
+                        if (cell.openN && cell.openE) yRot = 0f;   // Front+Right (default)
                         else if (cell.openE && cell.openS) yRot = 90f;  // Right+Back
                         else if (cell.openS && cell.openW) yRot = 180f; // Back+Left
                         else if (cell.openW && cell.openN) yRot = 270f; // Left+Front
@@ -166,7 +181,7 @@ public class MazeGeneratorHybrid : MonoBehaviour
                 {
                     // Dead end: default opens Front; rotate to point the opening to the open side
                     prefab = deadEndPrefab;
-                    if (cell.openN)      yRot = 0f;   // Front
+                    if (cell.openN) yRot = 0f;   // Front
                     else if (cell.openE) yRot = 90f;  // Right
                     else if (cell.openS) yRot = 180f; // Back
                     else if (cell.openW) yRot = 270f; // Left
@@ -210,7 +225,7 @@ public class MazeGeneratorHybrid : MonoBehaviour
 
         // Drop markers slightly above ground
         Vector3 startPos = new Vector3(start.x * cellSize, 0.01f, start.y * cellSize);
-        Vector3 exitPos  = new Vector3(far.x * cellSize,   0.01f, far.y * cellSize);
+        Vector3 exitPos = new Vector3(far.x * cellSize, 0.01f, far.y * cellSize);
 
         if (startMarkerPrefab)
             Instantiate(startMarkerPrefab, startPos, Quaternion.identity, transform);
@@ -235,8 +250,8 @@ public class MazeGeneratorHybrid : MonoBehaviour
 
             var cell = grid[c.x, c.y];
             // For each open direction, enqueue neighbor if not visited in BFS
-            TryBfsNeighbor(c, new Vector2Int(0, 1),  cell.openN, dist, q); // N
-            TryBfsNeighbor(c, new Vector2Int(1, 0),  cell.openE, dist, q); // E
+            TryBfsNeighbor(c, new Vector2Int(0, 1), cell.openN, dist, q); // N
+            TryBfsNeighbor(c, new Vector2Int(1, 0), cell.openE, dist, q); // E
             TryBfsNeighbor(c, new Vector2Int(0, -1), cell.openS, dist, q); // S
             TryBfsNeighbor(c, new Vector2Int(-1, 0), cell.openW, dist, q); // W
         }
@@ -252,6 +267,75 @@ public class MazeGeneratorHybrid : MonoBehaviour
         if (dist.ContainsKey(n)) return;
         dist[n] = dist[c] + 1;
         q.Enqueue(n);
+    }
+
+    private void AddRooms()
+    {
+        // Try to place a few 2x2 - 3x3 rooms
+        int attempts = 8;
+        for (int i = 0; i < attempts; i++)
+        {
+            int rw = Random.Range(2, 4); // room width 2–3
+            int rh = Random.Range(2, 4); // room height 2–3
+            int rx = Random.Range(0, width - rw);
+            int ry = Random.Range(0, height - rh);
+            MakeRoom(rx, ry, rw, rh);
+        }
+    }
+
+    private void MakeRoom(int rx, int ry, int rw, int rh)
+    {
+        // mark cells as room
+        for (int x = rx; x < rx + rw; x++)
+        {
+            for (int y = ry; y < ry + rh; y++)
+            {
+                grid[x, y].isRoom = true;
+            }
+        }
+
+        // open only internal walls between adjacent room cells
+        for (int x = rx; x < rx + rw; x++)
+        {
+            for (int y = ry; y < ry + rh; y++)
+            {
+                // if neighbour also inside the same rectangle, open the wall
+                if (x + 1 < rx + rw) // east neighbour
+                {
+                    grid[x, y].openE = true;
+                    grid[x + 1, y].openW = true;
+                }
+                if (y + 1 < ry + rh) // north neighbour
+                {
+                    grid[x, y].openN = true;
+                    grid[x, y + 1].openS = true;
+                }
+            }
+        }
+    }
+
+    private void AddExtraConnections()
+    {
+        // randomly knock out some walls to create loops / parallel corridors
+        for (int x = 0; x < width - 1; x++)
+        {
+            for (int y = 0; y < height - 1; y++)
+            {
+                if (Random.value < 0.05f) // 5% chance
+                {
+                    // open a wall between (x,y) and (x+1,y)
+                    grid[x, y].openE = true;
+                    grid[x + 1, y].openW = true;
+                }
+
+                if (Random.value < 0.05f)
+                {
+                    // open a wall between (x,y) and (x,y+1)
+                    grid[x, y].openN = true;
+                    grid[x, y + 1].openS = true;
+                }
+            }
+        }
     }
 }
 
